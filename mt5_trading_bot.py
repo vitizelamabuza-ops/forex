@@ -29,6 +29,8 @@ import sys
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
+import os
+from dotenv import load_dotenv
 
 
 # ==================== CONFIGURATION ====================
@@ -90,7 +92,7 @@ class MT5TradingBot:
         self.email_alerts = email_alerts
         self.email_address = email_address
         
-        # Initialize MT5
+        # Initialize MT5 (will attempt to login using .env or provided creds)
         self._init_mt5()
         
         # Setup logging
@@ -108,10 +110,60 @@ class MT5TradingBot:
         
         self.logger.info("✅ MT5 Trading Bot initialized successfully")
 
+    def login(self, login: Optional[int] = None, password: Optional[str] = None, server: Optional[str] = None) -> bool:
+        """
+        Login to MetaTrader 5 using provided credentials or environment variables.
+
+        The method will attempt the following in order:
+         - Load credentials from environment (.env if present)
+         - If login and password are available, call mt5.initialize(login=..., password=..., server=...)
+         - Otherwise fall back to mt5.initialize() without credentials
+
+        Returns:
+            True if MT5 connection and login succeeded, False otherwise.
+        """
+        # Load environment variables from .env if present
+        try:
+            load_dotenv()
+        except Exception:
+            # ignore dotenv loading errors; environment variables may already be present
+            pass
+
+        login = login or os.getenv('MT5_LOGIN')
+        password = password or os.getenv('MT5_PASSWORD')
+        server = server or os.getenv('MT5_SERVER')
+
+        # If login is a string, try to convert to int
+        if login is not None and isinstance(login, str):
+            try:
+                login = int(login)
+            except ValueError:
+                print(f"Invalid MT5_LOGIN value: {login}")
+                return False
+
+        # Try to initialize with credentials if we have them
+        try:
+            if login and password:
+                # Some MT5 builds accept credentials in initialize(); try that first
+                initialized = mt5.initialize(login=login, server=server, password=password)
+                if not initialized:
+                    # If initialize didn't accept credentials, try basic initialize then mt5.login
+                    mt5.initialize()
+                    logged = mt5.login(login, password, server)
+                    initialized = bool(logged)
+            else:
+                initialized = mt5.initialize()
+        except Exception as e:
+            print(f"MT5 initialization/login error: {e}")
+            return False
+
+        return bool(initialized)
+
     def _init_mt5(self) -> None:
-        """Initialize MetaTrader 5 connection"""
-        if not mt5.initialize():
-            print(f"MT5 initialization failed: {mt5.last_error()}")
+        """Initialize MetaTrader 5 connection and login"""
+        # Attempt to login using credentials from environment or defaults
+        if not self.login():
+            print("MT5 initialization/login failed. Please set MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER in your environment or pass credentials to the login() method.")
             sys.exit(1)
         
         version = mt5.version()
@@ -124,7 +176,11 @@ class MT5TradingBot:
         print(f"\n{'='*70}")
         print(f"🚀 MetaTrader 5 Connected")
         print(f"{'='*70}")
-        print(f"Version: {version[0]}.{version[1]}.{version[2]}")
+        # version may be a tuple
+        try:
+            print(f"Version: {version[0]}.{version[1]}.{version[2]}")
+        except Exception:
+            print(f"Version: {version}")
         print(f"Account: {account_info.login}")
         print(f"Server: {account_info.server}")
         print(f"Balance: ${account_info.balance:.2f}")
