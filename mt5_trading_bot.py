@@ -71,6 +71,7 @@ class MT5TradingBot:
         use_kelly: bool = True,
         email_alerts: bool = False,
         email_address: str = None,
+        auto_login: bool = True,           # NEW: control automatic login during init
     ):
         """
         Initialize MT5 Trading Bot
@@ -83,6 +84,7 @@ class MT5TradingBot:
             use_kelly: Use Kelly Criterion for position sizing
             email_alerts: Enable email notifications
             email_address: Email for alerts
+            auto_login: Attempt to login during initialization
         """
         self.symbols = symbols or ['EURUSD', 'GBPUSD', 'USDJPY']
         self.risk_per_trade = risk_per_trade
@@ -92,10 +94,7 @@ class MT5TradingBot:
         self.email_alerts = email_alerts
         self.email_address = email_address
         
-        # Initialize MT5 (will attempt to login using .env or provided creds)
-        self._init_mt5()
-        
-        # Setup logging
+        # Setup logging first so login can log to file
         self._setup_logging()
         
         # Performance tracking
@@ -108,7 +107,12 @@ class MT5TradingBot:
         # Initialize log files
         self._init_log_files()
         
-        self.logger.info("✅ MT5 Trading Bot initialized successfully")
+        # Optionally auto-login; caller can call login() manually (for linking)
+        self.logged_in = False
+        if auto_login:
+            self.logged_in = self._init_mt5()
+
+        self.logger.info("✅ MT5 Trading Bot initialized (auto_login=%s)" % auto_login)
 
     def login(self, login: Optional[int] = None, password: Optional[str] = None, server: Optional[str] = None) -> bool:
         """
@@ -159,34 +163,51 @@ class MT5TradingBot:
 
         return bool(initialized)
 
-    def _init_mt5(self) -> None:
-        """Initialize MetaTrader 5 connection and login"""
-        # Attempt to login using credentials from environment or defaults
-        if not self.login():
-            print("MT5 initialization/login failed. Please set MT5_LOGIN, MT5_PASSWORD, and MT5_SERVER in your environment or pass credentials to the login() method.")
-            sys.exit(1)
-        
-        version = mt5.version()
-        account_info = mt5.account_info()
-        
-        if account_info is None:
-            print("Failed to get account info")
-            sys.exit(1)
-        
-        print(f"\n{'='*70}")
-        print(f"🚀 MetaTrader 5 Connected")
-        print(f"{'='*70}")
-        # version may be a tuple
+    # Modified to return bool instead of exiting
+    def _init_mt5(self) -> bool:
+        """Initialize MetaTrader 5 connection and login. Returns True if connected."""
         try:
-            print(f"Version: {version[0]}.{version[1]}.{version[2]}")
-        except Exception:
-            print(f"Version: {version}")
-        print(f"Account: {account_info.login}")
-        print(f"Server: {account_info.server}")
-        print(f"Balance: ${account_info.balance:.2f}")
-        print(f"Equity: ${account_info.equity:.2f}")
-        print(f"{'='*70}\n")
+            success = self.login()
+        except Exception as e:
+            # logger may not be present in rare cases; fallback to print
+            try:
+                self.logger.error(f"Exception during login: {e}")
+            except Exception:
+                print(f"Exception during login: {e}")
+            success = False
 
+        if not success:
+            try:
+                self.logger.warning("MT5 initialization/login failed. Use bot.login(...) to link an account.")
+            except Exception:
+                print("MT5 initialization/login failed. Use bot.login(...) to link an account.")
+            return False
+
+        try:
+            version = mt5.version()
+            account_info = mt5.account_info()
+            if account_info is None:
+                self.logger.error("Failed to get account info after login.")
+                return False
+
+            # Print basic connection info (no credentials)
+            print(f"\n{'='*70}")
+            print(f"🚀 MetaTrader 5 Connected")
+            print(f"{'='*70}")
+            try:
+                print(f"Version: {version[0]}.{version[1]}.{version[2]}")
+            except Exception:
+                print(f"Version: {version}")
+            print(f"Account: {account_info.login}")
+            print(f"Server: {account_info.server}")
+            print(f"Balance: ${account_info.balance:.2f}")
+            print(f"Equity: ${account_info.equity:.2f}")
+            print(f"{'='*70}\n")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error after successful login: {e}")
+            return False
+        
     def _setup_logging(self) -> None:
         """Setup logging configuration"""
         self.logger = logging.getLogger('MT5Bot')
@@ -207,6 +228,10 @@ class MT5TradingBot:
         fh.setFormatter(formatter)
         ch.setFormatter(formatter)
         
+        # Remove existing handlers to avoid duplicate logs in repeated inits
+        if self.logger.handlers:
+            self.logger.handlers = []
+
         self.logger.addHandler(fh)
         self.logger.addHandler(ch)
 
@@ -855,31 +880,71 @@ class MT5TradingBot:
         self.logger.info(f"{'='*70}\n")
 
 
-# ==================== MAIN EXECUTION ====================
+# ==================== MAIN EXECUTION (with CLI) ====================
 
 def main():
-    """Main entry point"""
-    
-    # Bot configuration
+    import argparse
+    parser = argparse.ArgumentParser(description="MT5 Trading Bot")
+    parser.add_argument('--no-login', action='store_true', help='Do not auto-login on start (useful to run signal-only work).')
+    parser.add_argument('--login', action='store_true', help='Attempt login using provided credentials or environment.')
+    parser.add_argument('--account', type=str, help='MT5 account number')
+    parser.add_argument('--password', type=str, help='MT5 account password')
+    parser.add_argument('--server', type=str, help='MT5 server name')
+    parser.add_argument('--link-interactive', action='store_true', help='Prompt interactively for account credentials and link them.')
+    parser.add_argument('--store-keyring', action='store_true', help='(Optional) store credentials in OS keyring (requires keyring package).')
+    args = parser.parse_args()
+
+    # Create bot but avoid auto login if --no-login passed
     bot = MT5TradingBot(
         symbols=['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD'],
-        risk_per_trade=0.02,           # Risk 2% per trade
-        max_daily_loss=0.05,           # Stop at 5% daily loss
-        max_trades_per_day=5,          # Max 5 trades per day
-        use_kelly=True,                # Use Kelly Criterion
-        email_alerts=False,            # Disable for now
-        email_address=None
+        risk_per_trade=0.02,
+        max_daily_loss=0.05,
+        max_trades_per_day=5,
+        use_kelly=True,
+        email_alerts=False,
+        email_address=None,
+        auto_login=not args.no_login
     )
-    
-    # Run the bot
-    try:
-        bot.run(
-            check_interval=300,        # Check every 5 minutes
-            timeframe=mt5.TIMEFRAME_M5 # 5-minute timeframe
-        )
-    except Exception as e:
-        bot.logger.error(f"Fatal error: {e}")
-        bot.print_summary()
+
+    # Interactive linking
+    if args.link_interactive:
+        acct = input("MT5 Account number: ").strip()
+        pwd = input("MT5 Password: ").strip()
+        srv = input("MT5 Server: ").strip()
+        if args.store_keyring:
+            try:
+                import keyring
+                keyring.set_password("mt5_bot", acct, pwd)
+                bot.logger.info("Credentials stored in OS keyring for account %s" % acct)
+            except Exception as e:
+                bot.logger.warning("keyring storage failed: %s" % e)
+        ok = bot.login(login=acct, password=pwd, server=srv)
+        if not ok:
+            bot.logger.error("Login failed with provided credentials.")
+            return
+
+    # Non-interactive login via CLI args
+    if args.login and not args.link_interactive:
+        acct = args.account or os.getenv('MT5_LOGIN')
+        pwd = args.password or os.getenv('MT5_PASSWORD')
+        srv = args.server or os.getenv('MT5_SERVER')
+        if not acct or not pwd or not srv:
+            bot.logger.error("Missing account, password or server for non-interactive login.")
+            return
+        ok = bot.login(login=acct, password=pwd, server=srv)
+        if not ok:
+            bot.logger.error("Login failed via CLI/env credentials.")
+            return
+
+    # If bot not logged in but you want to run the main loop only for signals, you can still call run()
+    if bot.logged_in or args.no_login:
+        try:
+            bot.run(check_interval=300, timeframe=mt5.TIMEFRAME_M5)
+        except Exception as e:
+            bot.logger.error(f"Fatal error: {e}")
+            bot.print_summary()
+    else:
+        bot.logger.error("Bot is not logged in. Use --login or --link-interactive to link an account.")
 
 
 if __name__ == '__main__':
